@@ -1,0 +1,236 @@
+heat_template_version: 2016-10-14
+
+# parameter_groups:
+# - label: basic
+#   description: basic settings
+#   parameters:
+#   - name
+#   - external-network
+
+parameters:
+  name:
+    type: string
+    default: k8s
+    description: give a name as prefix for creating resource
+    constraints:
+    - allowed_pattern: "[a-z][a-z0-9]+"
+      description: name must follow pattern "[a-z][a-z0-9]+"
+    - length: { min: 3, max: 8}
+      description: name length must in [3, 8]
+    label: "Prefix Name"
+  external-network:
+    type: string
+    description: external network
+    constraints:
+    - custom_constraint: neutron.network
+    label: "External Network"
+  image:
+    type: string
+    description: os image
+    constraints:
+    - custom_constraint: glance.image
+    label: "OS Image"
+  zone:
+    type: string
+    description: Zone
+    constraints:
+    - allowed_values:
+      - reserve
+    label: "Zone"
+  key:
+    type: string
+    description: SSH Keyname
+    constraints:
+    - custom_constraint: nova.keypair
+    label: "Key Pair"
+  dns_list:
+    type: comma_delimited_list
+    default: [10.171.10.1, 10.171.10.2]
+    description: DNS Servers
+    label: "DNS Servers"
+  node_count:
+    type: number
+    default: 3
+    constraints:
+    - range: { min: 3, max: 8 }
+    label: "Node Count"
+  proxy_server:
+    type: string
+    default: 10.158.100.8
+    description: HTTP proxy server
+  proxy_port:
+    type: number
+    default: 8080
+    description: HTTP proxy port
+
+resources:
+  rand_str:
+    type: OS::Heat::RandomString
+    properties:
+      character_classes:
+      - class: "lowercase"
+      length: 8
+
+  flavor_common:
+    type: OS::Nova::Flavor
+    properties:
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-flavor-c2m8"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+      vcpus: 2
+      ram: 8192
+      disk: 40
+      is_public: false
+      ephemeral: 0
+      rxtx_factor: 1.0
+      swap: 0
+
+  internal_net:
+    type: OS::Neutron::Net
+    properties:
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-net-internal"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+
+  internal_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-subnet-internal"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+      network: {get_resource: internal_net}
+      cidr: 192.168.0.0/24
+      allocation_pools:
+      - start: 192.168.0.100
+        end: 192.168.0.199
+      dns_nameservers: { get_param: dns_list }
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-router"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+      external_gateway_info:
+        network: { get_param: external-network }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      subnet: { get_resource: internal_subnet }
+      router: { get_resource: router }
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external-network }
+
+  master_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: internal_net }
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-master-port"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+  
+  node_ports:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: node_count }
+      resource_def:
+        type: OS::Neutron::Port
+        properties:
+          network: { get_resource: internal_net }
+          name:
+            str_replace:
+              template: "%prefix%-%rand%-node-port-%index%"
+              params:
+                "%prefix%": { get_param: name }
+                "%rand%": { get_attr: [rand_str, value] }
+
+  cloud_config_proxy:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        write_files:
+        - path: /etc/profile.d/proxy.sh
+          permissions: '0644'
+          content:
+            str_replace:
+              template: |
+                #!/bin/sh
+                export http_proxy=http://%server%:%port%
+                export https_proxy=http://%server%:%port%
+                export ftp_proxy=http://%server%:%port%
+                export no_proxy=localhost,127.0.0.1,instance-data,169.254.169.254,.nokia.net,.nsn-net.net,.nsn-rdnet.net,.ext.net.nokia.com,.int.net.nokia.com,.inside.nsn.com,.inside.nokiasiemensnetworks.com
+              params:
+                "%server%": { get_param: proxy_server }
+                "%port%": { get_param: proxy_port }
+
+  cloud_init_common:
+    type: OS::Heat::MultipartMime
+    properties:
+      parts:
+      - { subtype: cloud-config, config: { get_resource: cloud_config_proxy } }
+        
+  master_server:
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template: "%prefix%-%rand%-master"
+          params:
+            "%prefix%": { get_param: name }
+            "%rand%": { get_attr: [rand_str, value] }
+      image: { get_param: image }
+      flavor: { get_resource: flavor_common }
+      availability_zone: { get_param: zone }
+      key_name: { get_param: key }
+      networks:
+      - port: { get_resource: master_port }
+        floating_ip: { get_resource: floating_ip }
+      user_data_format: RAW
+      user_data: {get_resource: cloud_init_common}
+
+  node_servers:
+    depends_on: node_ports
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: node_count }
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          name:
+            str_replace:
+              template: "%prefix%-%rand%-node-%index%"
+              params:
+                "%prefix%": { get_param: name }
+                "%rand%": { get_attr: [rand_str, value] }
+          image: { get_param: image }
+          flavor: { get_resource: flavor_common }
+          availability_zone: { get_param: zone }
+          key_name: { get_param: key }
+          networks:
+          - port:
+              str_replace:
+                template: "%prefix%-%rand%-node-port-%index%"
+                params:
+                  "%prefix%": { get_param: name }
+                  "%rand%": { get_attr: [rand_str, value] }
+          user_data_format: RAW
+          user_data: {get_resource: cloud_init_common}
