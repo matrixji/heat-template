@@ -56,7 +56,7 @@ parameters:
     label: "Node Count"
   proxy_server:
     type: string
-    default: 10.158.100.8
+    default: 10.144.1.10
     description: HTTP proxy server
   proxy_port:
     type: number
@@ -141,13 +141,15 @@ resources:
     type: OS::Neutron::Port
     properties:
       network: { get_resource: internal_net }
+      fixed_ips:
+      - subnet_id: { get_resource: internal_subnet }
       name:
         str_replace:
           template: "%prefix%-%rand%-master-port"
           params:
             "%prefix%": { get_param: name }
             "%rand%": { get_attr: [rand_str, value] }
-  
+
   node_ports:
     type: OS::Heat::ResourceGroup
     properties:
@@ -156,6 +158,8 @@ resources:
         type: OS::Neutron::Port
         properties:
           network: { get_resource: internal_net }
+          fixed_ips:
+          - subnet_id: { get_resource: internal_subnet }
           name:
             str_replace:
               template: "%prefix%-%rand%-node-port-%index%"
@@ -182,12 +186,37 @@ resources:
                 "%server%": { get_param: proxy_server }
                 "%port%": { get_param: proxy_port }
 
+  cloud_config_kubernetes_repo:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        yum_repos:
+          kubernetes:
+            baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+            enabled: true
+            failovermethod: priority
+            gpgcheck: true
+            gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg
+            name: Kubernetes
+
+  cloud_config_selinux:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config: |
+        #cloud-boothook
+        #!/bin/sh
+        setenforce 0
+        sed -i '/^SELINUX=/ s/=.*/=permissive/' /etc/selinux/config
+
   cloud_init_common:
     type: OS::Heat::MultipartMime
     properties:
       parts:
-      - { subtype: cloud-config, config: { get_resource: cloud_config_proxy } }
-        
+      - config: { get_resource: cloud_config_selinux }
+      - config: { get_resource: cloud_config_proxy }
+      - config: { get_resource: cloud_config_kubernetes_repo }
+
   master_server:
     type: OS::Nova::Server
     properties:
@@ -205,7 +234,7 @@ resources:
       - port: { get_resource: master_port }
         floating_ip: { get_resource: floating_ip }
       user_data_format: RAW
-      user_data: {get_resource: cloud_init_common}
+      user_data: { get_resource: cloud_init_common }
 
   node_servers:
     depends_on: node_ports
