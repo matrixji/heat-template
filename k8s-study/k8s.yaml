@@ -1,12 +1,5 @@
 heat_template_version: 2016-10-14
 
-# parameter_groups:
-# - label: basic
-#   description: basic settings
-#   parameters:
-#   - name
-#   - external-network
-
 parameters:
   name:
     type: string
@@ -33,9 +26,7 @@ parameters:
   zone:
     type: string
     description: Zone
-    constraints:
-    - allowed_values:
-      - reserve
+    default: ""
     label: "Zone"
   key:
     type: string
@@ -43,25 +34,31 @@ parameters:
     constraints:
     - custom_constraint: nova.keypair
     label: "Key Pair"
-  dns_list:
-    type: comma_delimited_list
-    default: [10.171.10.1, 10.171.10.2]
+  dns:
+    type: string
+    default: 10.171.10.1,10.171.10.2
     description: DNS Servers
     label: "DNS Servers"
-  node_count:
+  minion_count:
     type: number
     default: 3
     constraints:
     - range: { min: 3, max: 8 }
-    label: "Node Count"
+    label: "Minion Count"
   proxy_server:
     type: string
     default: 10.144.1.10
     description: HTTP proxy server
+    label: "Proxy Server"
   proxy_port:
     type: number
     default: 8080
     description: HTTP proxy port
+    label: "Proxy Port"
+  flavor:
+    type: string
+    constraints:
+    - custom_constraint: nova.flavor
 
 resources:
   rand_str:
@@ -70,23 +67,6 @@ resources:
       character_classes:
       - class: "lowercase"
       length: 8
-
-  flavor_common:
-    type: OS::Nova::Flavor
-    properties:
-      name:
-        str_replace:
-          template: "%prefix%-%rand%-flavor-c2m8"
-          params:
-            "%prefix%": { get_param: name }
-            "%rand%": { get_attr: [rand_str, value] }
-      vcpus: 2
-      ram: 8192
-      disk: 40
-      is_public: false
-      ephemeral: 0
-      rxtx_factor: 1.0
-      swap: 0
 
   internal_net:
     type: OS::Neutron::Net
@@ -112,7 +92,10 @@ resources:
       allocation_pools:
       - start: 192.168.0.100
         end: 192.168.0.199
-      dns_nameservers: { get_param: dns_list }
+      dns_nameservers:
+        str_split:
+        - ','
+        - { get_param: dns }
 
   router:
     type: OS::Neutron::Router
@@ -150,10 +133,10 @@ resources:
             "%prefix%": { get_param: name }
             "%rand%": { get_attr: [rand_str, value] }
 
-  node_ports:
+  minion_ports:
     type: OS::Heat::ResourceGroup
     properties:
-      count: { get_param: node_count }
+      count: { get_param: minion_count }
       resource_def:
         type: OS::Neutron::Port
         properties:
@@ -162,7 +145,7 @@ resources:
           - subnet_id: { get_resource: internal_subnet }
           name:
             str_replace:
-              template: "%prefix%-%rand%-node-port-%index%"
+              template: "%prefix%-%rand%-minion-port-%index%"
               params:
                 "%prefix%": { get_param: name }
                 "%rand%": { get_attr: [rand_str, value] }
@@ -196,7 +179,9 @@ resources:
             enabled: true
             failovermethod: priority
             gpgcheck: true
-            gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg
+            gpgkey: >
+              https://packages.cloud.google.com/yum/doc/yum-key.gpg
+              https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
             name: Kubernetes
 
   cloud_config_selinux:
@@ -227,7 +212,7 @@ resources:
             "%prefix%": { get_param: name }
             "%rand%": { get_attr: [rand_str, value] }
       image: { get_param: image }
-      flavor: { get_resource: flavor_common }
+      flavor: { get_param: flavor }
       availability_zone: { get_param: zone }
       key_name: { get_param: key }
       networks:
@@ -236,28 +221,28 @@ resources:
       user_data_format: RAW
       user_data: { get_resource: cloud_init_common }
 
-  node_servers:
-    depends_on: node_ports
+  minion_servers:
+    depends_on: minion_ports
     type: OS::Heat::ResourceGroup
     properties:
-      count: { get_param: node_count }
+      count: { get_param: minion_count }
       resource_def:
         type: OS::Nova::Server
         properties:
           name:
             str_replace:
-              template: "%prefix%-%rand%-node-%index%"
+              template: "%prefix%-%rand%-minion-%index%"
               params:
                 "%prefix%": { get_param: name }
                 "%rand%": { get_attr: [rand_str, value] }
           image: { get_param: image }
-          flavor: { get_resource: flavor_common }
+          flavor: { get_param: flavor }
           availability_zone: { get_param: zone }
           key_name: { get_param: key }
           networks:
           - port:
               str_replace:
-                template: "%prefix%-%rand%-node-port-%index%"
+                template: "%prefix%-%rand%-minion-port-%index%"
                 params:
                   "%prefix%": { get_param: name }
                   "%rand%": { get_attr: [rand_str, value] }
